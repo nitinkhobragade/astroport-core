@@ -13,26 +13,32 @@ use astroport::pair_stable_bluna::{
 
 use astroport::token::InstantiateMsg as TokenInstantiateMsg;
 use astroport_pair_stable_bluna::math::{MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME};
-use cosmwasm_std::testing::{mock_env, MockApi, MockQuerier, MockStorage};
+use cosmwasm_std::testing::{mock_env, MockApi, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    attr, from_binary, to_binary, Addr, Coin, Decimal, QueryRequest, Uint128, WasmQuery,
+    attr, from_binary, to_binary, Addr, Coin, Decimal, QueryRequest, StdResult, Uint128, WasmQuery,
 };
 use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
-use terra_multi_test::{App, BankKeeper, ContractWrapper, Executor, TerraMockQuerier};
+use terra_multi_test::{AppBuilder, BankKeeper, ContractWrapper, Executor, TerraApp, TerraMock};
 
 const OWNER: &str = "owner";
 
-fn mock_app() -> App {
+fn mock_app() -> TerraApp {
     let env = mock_env();
     let api = MockApi::default();
-    let bank = BankKeeper {};
+    let bank = BankKeeper::new();
+    let storage = MockStorage::new();
+    let custom = TerraMock::luna_ust_case();
 
-    let terra_mock_querier = TerraMockQuerier::new(MockQuerier::new(&[]));
-    App::new(api, env.block, bank, MockStorage::new(), terra_mock_querier)
+    AppBuilder::new()
+        .with_api(api)
+        .with_block(env.block)
+        .with_bank(bank)
+        .with_storage(storage)
+        .with_custom(custom)
+        .build()
 }
-
-fn store_token_code(app: &mut App) -> u64 {
-    let astro_token_contract = Box::new(ContractWrapper::new(
+fn store_token_code(app: &mut TerraApp) -> u64 {
+    let astro_token_contract = Box::new(ContractWrapper::new_with_empty(
         astroport_token::contract::execute,
         astroport_token::contract::instantiate,
         astroport_token::contract::query,
@@ -41,48 +47,189 @@ fn store_token_code(app: &mut App) -> u64 {
     app.store_code(astro_token_contract)
 }
 
-fn store_pair_code(app: &mut App) -> u64 {
+fn store_pair_code(app: &mut TerraApp) -> u64 {
     let pair_contract = Box::new(
-        ContractWrapper::new(
+        ContractWrapper::new_with_empty(
             astroport_pair_stable_bluna::contract::execute,
             astroport_pair_stable_bluna::contract::instantiate,
             astroport_pair_stable_bluna::contract::query,
         )
-        .with_reply(astroport_pair_stable_bluna::contract::reply),
+        .with_reply_empty(astroport_pair_stable_bluna::contract::reply),
     );
 
     app.store_code(pair_contract)
 }
 
-fn store_factory_code(app: &mut App) -> u64 {
+fn store_factory_code(app: &mut TerraApp) -> u64 {
     let factory_contract = Box::new(
-        ContractWrapper::new(
+        ContractWrapper::new_with_empty(
             astroport_factory::contract::execute,
             astroport_factory::contract::instantiate,
             astroport_factory::contract::query,
         )
-        .with_reply(astroport_factory::contract::reply),
+        .with_reply_empty(astroport_factory::contract::reply),
     );
 
     app.store_code(factory_contract)
 }
 
-fn instantiate_pair(mut router: &mut App, owner: &Addr) -> Addr {
-    let token_contract_code_id = store_token_code(&mut router);
+fn store_whitelist_code(app: &mut TerraApp) -> u64 {
+    let whitelist_contract = Box::new(ContractWrapper::new_with_empty(
+        astroport_whitelist::contract::execute,
+        astroport_whitelist::contract::instantiate,
+        astroport_whitelist::contract::query,
+    ));
 
-    let pair_contract_code_id = store_pair_code(&mut router);
+    app.store_code(whitelist_contract)
+}
 
+fn instantiate_factory(
+    mut router: &mut TerraApp,
+    owner: &Addr,
+    token_code_id: u64,
+    pair_code_id: u64,
+) -> Addr {
+    let factory_code_id = store_factory_code(&mut router);
+    let whitelist_code_id = store_whitelist_code(&mut router);
+
+    let init_msg = FactoryInstantiateMsg {
+        fee_address: None,
+        pair_configs: vec![PairConfig {
+            code_id: pair_code_id,
+            maker_fee_bps: 0,
+            total_fee_bps: 0,
+            pair_type: PairType::Stable {},
+            is_disabled: None,
+        }],
+        token_code_id,
+        generator_address: Some(MOCK_CONTRACT_ADDR.to_string()),
+        owner: owner.to_string(),
+        whitelist_code_id,
+    };
+
+    router
+        .instantiate_contract(
+            factory_code_id,
+            owner.clone(),
+            &init_msg,
+            &[],
+            "FACTORY",
+            None,
+        )
+        .unwrap()
+}
+
+fn instantiate_bluna_contracts(router: &mut TerraApp, sender: &Addr) -> (Addr, Addr, Addr) {
+    let bluna_hub_contract = Box::new(ContractWrapper::new_with_empty(
+        anchor_basset_hub::contract::execute,
+        anchor_basset_hub::contract::instantiate,
+        anchor_basset_hub::contract::query,
+    ));
+
+    let bluna_hub_code_id = router.store_code(bluna_hub_contract);
+
+    let bluna_hub_init_msg = anchor_basset::hub::InstantiateMsg {
+        epoch_period: 0,
+        er_threshold: Decimal::zero(),
+        peg_recovery_fee: Decimal::zero(),
+        reward_denom: "".to_string(),
+        unbonding_period: 0,
+        underlying_coin_denom: "".to_string(),
+        validator: "".to_string(),
+    };
+
+    let bluna_hub_instance = router
+        .instantiate_contract(
+            bluna_hub_code_id,
+            sender.clone(),
+            &bluna_hub_init_msg,
+            &[],
+            "BLUNA HUB",
+            None,
+        )
+        .unwrap();
+
+    let bluna_rewarder_contract = Box::new(ContractWrapper::new(
+        anchor_basset_reward::contract::execute,
+        anchor_basset_reward::contract::instantiate,
+        anchor_basset_reward::contract::query,
+    ));
+
+    let bluna_reward_code_id = router.store_code(bluna_rewarder_contract);
+
+    let bluna_reward_init_msg = anchor_basset::reward::InstantiateMsg {
+        hub_contract: bluna_hub_instance.to_string(),
+        reward_denom: "uusd".to_string(),
+    };
+
+    let bluna_reward_instance = router
+        .instantiate_contract(
+            bluna_reward_code_id,
+            sender.clone(),
+            &bluna_reward_init_msg,
+            &[],
+            "BLUNA REWARD",
+            None,
+        )
+        .unwrap();
+
+    let bluna_token_contract = Box::new(ContractWrapper::new_with_empty(
+        anchor_basset_token::contract::execute,
+        anchor_basset_token::contract::instantiate,
+        anchor_basset_token::contract::query,
+    ));
+
+    let bluna_token_code_id = router.store_code(bluna_token_contract);
+
+    let bluna_token_init_msg = cw20_legacy::msg::InstantiateMsg {
+        decimals: 6,
+        initial_balances: vec![],
+        mint: Some(MinterResponse {
+            cap: None,
+            minter: bluna_hub_instance.to_string(),
+        }),
+        name: "Bluna".to_string(),
+        symbol: "BLUNA".to_string(),
+    };
+
+    let bluna_token_instance = router
+        .instantiate_contract(
+            bluna_token_code_id,
+            sender.clone(),
+            &bluna_token_init_msg,
+            &[],
+            "BLUNA TOKEN",
+            None,
+        )
+        .unwrap();
+
+    (
+        bluna_hub_instance,
+        bluna_reward_instance,
+        bluna_token_instance,
+    )
+}
+
+fn instantiate_pair(
+    mut router: &mut TerraApp,
+    owner: &Addr,
+    token_contract_code_id: u64,
+    pair_contract_code_id: u64,
+    factory_addr: &Addr,
+    bluna_token: &Addr,
+    bluna_rewarder: &Addr,
+) -> Addr {
     let msg = InstantiateMsg {
         asset_infos: [
-            AssetInfo::NativeToken {
-                denom: "uusd".to_string(),
+            AssetInfo::Token {
+                contract_addr: bluna_token.clone(),
             },
             AssetInfo::NativeToken {
                 denom: "uluna".to_string(),
             },
         ],
         token_code_id: token_contract_code_id,
-        factory_addr: Addr::unchecked("factory"),
+        factory_addr: factory_addr.clone(),
         init_params: None,
     };
 
@@ -100,19 +247,19 @@ fn instantiate_pair(mut router: &mut App, owner: &Addr) -> Addr {
 
     let msg = InstantiateMsg {
         asset_infos: [
-            AssetInfo::NativeToken {
-                denom: "uusd".to_string(),
+            AssetInfo::Token {
+                contract_addr: bluna_token.clone(),
             },
             AssetInfo::NativeToken {
                 denom: "uluna".to_string(),
             },
         ],
         token_code_id: token_contract_code_id,
-        factory_addr: Addr::unchecked("factory"),
+        factory_addr: factory_addr.clone(),
         init_params: Some(
             to_binary(&StablePoolParams {
                 amp: 100,
-                bluna_rewarder: "bluna_rewarder".to_string(),
+                bluna_rewarder: bluna_rewarder.to_string(),
             })
             .unwrap(),
         ),
@@ -129,19 +276,12 @@ fn instantiate_pair(mut router: &mut App, owner: &Addr) -> Addr {
         )
         .unwrap();
 
-    let res: PairInfo = router
-        .wrap()
-        .query_wasm_smart(pair.clone(), &QueryMsg::Pair {})
-        .unwrap();
-    assert_eq!("contract #0", res.contract_addr);
-    assert_eq!("contract #1", res.liquidity_token);
-
     pair
 }
 
 #[test]
 fn test_provide_and_withdraw_liquidity() {
-    let owner = Addr::unchecked("owner");
+    let owner = Addr::unchecked(OWNER);
     let alice_address = Addr::unchecked("alice");
     let mut router = mock_app();
 
@@ -149,21 +289,31 @@ fn test_provide_and_withdraw_liquidity() {
     router
         .init_bank_balance(
             &alice_address,
-            vec![
-                Coin {
-                    denom: "uusd".to_string(),
-                    amount: Uint128::new(200u128),
-                },
-                Coin {
-                    denom: "uluna".to_string(),
-                    amount: Uint128::new(200u128),
-                },
-            ],
+            vec![Coin {
+                denom: "uluna".to_string(),
+                amount: Uint128::new(200u128),
+            }],
         )
         .unwrap();
 
+    let token_code_id = store_token_code(&mut router);
+    let pair_code_id = store_pair_code(&mut router);
+
+    let factory_instance = instantiate_factory(&mut router, &owner, token_code_id, pair_code_id);
+
+    let (bluna_hub_instance, bluna_reward_instance, bluna_token_instance) =
+        instantiate_bluna_contracts(&mut router, &owner);
+
     // Init pair
-    let pair_instance = instantiate_pair(&mut router, &owner);
+    let pair_instance = instantiate_pair(
+        &mut router,
+        &owner,
+        token_code_id,
+        pair_code_id,
+        &factory_instance,
+        &bluna_token_instance,
+        &bluna_reward_instance,
+    );
 
     let res: Result<PairInfo, _> = router.wrap().query(&QueryRequest::Wasm(WasmQuery::Smart {
         contract_addr: pair_instance.to_string(),
@@ -174,8 +324,8 @@ fn test_provide_and_withdraw_liquidity() {
     assert_eq!(
         res.asset_infos,
         [
-            AssetInfo::NativeToken {
-                denom: "uusd".to_string(),
+            AssetInfo::Token {
+                contract_addr: bluna_token_instance.clone(),
             },
             AssetInfo::NativeToken {
                 denom: "uluna".to_string(),
@@ -183,20 +333,13 @@ fn test_provide_and_withdraw_liquidity() {
         ],
     );
 
-    // When dealing with native tokens transfer should happen before contract call, which cw-multitest doesn't support
     router
         .init_bank_balance(
             &pair_instance,
-            vec![
-                Coin {
-                    denom: "uusd".to_string(),
-                    amount: Uint128::new(100u128),
-                },
-                Coin {
-                    denom: "uluna".to_string(),
-                    amount: Uint128::new(100u128),
-                },
-            ],
+            vec![Coin {
+                denom: "uluna".to_string(),
+                amount: Uint128::new(100u128),
+            }],
         )
         .unwrap();
 
@@ -255,17 +398,18 @@ fn test_provide_and_withdraw_liquidity() {
 }
 
 fn provide_liquidity_msg(
-    uusd_amount: Uint128,
+    bluna_token: &Addr,
+    bluna_amount: Uint128,
     uluna_amount: Uint128,
     receiver: Option<String>,
 ) -> (ExecuteMsg, [Coin; 2]) {
     let msg = ExecuteMsg::ProvideLiquidity {
         assets: [
             Asset {
-                info: AssetInfo::NativeToken {
-                    denom: "uusd".to_string(),
+                info: AssetInfo::Token {
+                    contract_addr: bluna_token.clone(),
                 },
-                amount: uusd_amount.clone(),
+                amount: bluna_amount.clone(),
             },
             Asset {
                 info: AssetInfo::NativeToken {
@@ -279,223 +423,12 @@ fn provide_liquidity_msg(
         receiver,
     };
 
-    let coins = [
-        Coin {
-            denom: "uusd".to_string(),
-            amount: uusd_amount.clone(),
-        },
-        Coin {
-            denom: "uluna".to_string(),
-            amount: uluna_amount.clone(),
-        },
-    ];
+    let coins = [Coin {
+        denom: "uluna".to_string(),
+        amount: uluna_amount.clone(),
+    }];
 
     (msg, coins)
-}
-
-#[test]
-fn test_compatibility_of_tokens_with_different_precision() {
-    let mut app = mock_app();
-
-    let owner = Addr::unchecked(OWNER);
-
-    let token_code_id = store_token_code(&mut app);
-
-    let x_amount = Uint128::new(1000000_00000);
-    let y_amount = Uint128::new(1000000_0000000);
-    let x_offer = Uint128::new(1_00000);
-    let y_expected_return = Uint128::new(1_0000000);
-
-    let token_name = "Xtoken";
-
-    let init_msg = TokenInstantiateMsg {
-        name: token_name.to_string(),
-        symbol: token_name.to_string(),
-        decimals: 5,
-        initial_balances: vec![Cw20Coin {
-            address: OWNER.to_string(),
-            amount: x_amount + x_offer,
-        }],
-        mint: Some(MinterResponse {
-            minter: String::from(OWNER),
-            cap: None,
-        }),
-    };
-
-    let token_x_instance = app
-        .instantiate_contract(
-            token_code_id,
-            owner.clone(),
-            &init_msg,
-            &[],
-            token_name,
-            None,
-        )
-        .unwrap();
-
-    let token_name = "Ytoken";
-
-    let init_msg = TokenInstantiateMsg {
-        name: token_name.to_string(),
-        symbol: token_name.to_string(),
-        decimals: 7,
-        initial_balances: vec![Cw20Coin {
-            address: OWNER.to_string(),
-            amount: y_amount,
-        }],
-        mint: Some(MinterResponse {
-            minter: String::from(OWNER),
-            cap: None,
-        }),
-    };
-
-    let token_y_instance = app
-        .instantiate_contract(
-            token_code_id,
-            owner.clone(),
-            &init_msg,
-            &[],
-            token_name,
-            None,
-        )
-        .unwrap();
-
-    let pair_code_id = store_pair_code(&mut app);
-    let factory_code_id = store_factory_code(&mut app);
-
-    let init_msg = FactoryInstantiateMsg {
-        fee_address: None,
-        pair_configs: vec![PairConfig {
-            code_id: pair_code_id,
-            maker_fee_bps: 0,
-            total_fee_bps: 0,
-            pair_type: PairType::Stable {},
-            is_disabled: None,
-        }],
-        token_code_id,
-        generator_address: Some(String::from("generator")),
-        owner: String::from("owner0000"),
-        whitelist_code_id: 234u64,
-    };
-
-    let factory_instance = app
-        .instantiate_contract(
-            factory_code_id,
-            owner.clone(),
-            &init_msg,
-            &[],
-            "FACTORY",
-            None,
-        )
-        .unwrap();
-
-    let msg = FactoryExecuteMsg::CreatePair {
-        pair_type: PairType::Stable {},
-        asset_infos: [
-            AssetInfo::Token {
-                contract_addr: token_x_instance.clone(),
-            },
-            AssetInfo::Token {
-                contract_addr: token_y_instance.clone(),
-            },
-        ],
-        init_params: Some(
-            to_binary(&StablePoolParams {
-                amp: 100,
-                bluna_rewarder: "bluna_rewarder".to_string(),
-            })
-            .unwrap(),
-        ),
-    };
-
-    app.execute_contract(owner.clone(), factory_instance.clone(), &msg, &[])
-        .unwrap();
-
-    let msg = FactoryQueryMsg::Pair {
-        asset_infos: [
-            AssetInfo::Token {
-                contract_addr: token_x_instance.clone(),
-            },
-            AssetInfo::Token {
-                contract_addr: token_y_instance.clone(),
-            },
-        ],
-    };
-
-    let res: PairInfo = app
-        .wrap()
-        .query_wasm_smart(&factory_instance, &msg)
-        .unwrap();
-
-    let pair_instance = res.contract_addr;
-
-    let msg = Cw20ExecuteMsg::IncreaseAllowance {
-        spender: pair_instance.to_string(),
-        expires: None,
-        amount: x_amount + x_offer,
-    };
-
-    app.execute_contract(owner.clone(), token_x_instance.clone(), &msg, &[])
-        .unwrap();
-
-    let msg = Cw20ExecuteMsg::IncreaseAllowance {
-        spender: pair_instance.to_string(),
-        expires: None,
-        amount: y_amount,
-    };
-
-    app.execute_contract(owner.clone(), token_y_instance.clone(), &msg, &[])
-        .unwrap();
-
-    let msg = ExecuteMsg::ProvideLiquidity {
-        assets: [
-            Asset {
-                info: AssetInfo::Token {
-                    contract_addr: token_x_instance.clone(),
-                },
-                amount: x_amount,
-            },
-            Asset {
-                info: AssetInfo::Token {
-                    contract_addr: token_y_instance.clone(),
-                },
-                amount: y_amount,
-            },
-        ],
-        slippage_tolerance: None,
-        auto_stake: None,
-        receiver: None,
-    };
-
-    app.execute_contract(owner.clone(), pair_instance.clone(), &msg, &[])
-        .unwrap();
-
-    let user = Addr::unchecked("user");
-
-    let msg = Cw20ExecuteMsg::Send {
-        contract: pair_instance.to_string(),
-        msg: to_binary(&Cw20HookMsg::Swap {
-            belief_price: None,
-            max_spread: None,
-            to: Some(user.to_string()),
-        })
-        .unwrap(),
-        amount: x_offer,
-    };
-
-    app.execute_contract(owner.clone(), token_x_instance.clone(), &msg, &[])
-        .unwrap();
-
-    let msg = Cw20QueryMsg::Balance {
-        address: user.to_string(),
-    };
-
-    let res: BalanceResponse = app
-        .wrap()
-        .query_wasm_smart(&token_y_instance, &msg)
-        .unwrap();
-
-    assert_eq!(res.balance, y_expected_return);
 }
 
 #[test]
@@ -519,8 +452,24 @@ fn test_if_twap_is_calculated_correctly_when_pool_idles() {
     )
     .unwrap();
 
+    let token_code_id = store_token_code(&mut app);
+    let pair_code_id = store_pair_code(&mut app);
+
+    let factory_instance = instantiate_factory(&mut app, &user1, token_code_id, pair_code_id);
+
+    let (bluna_hub_instance, bluna_reward_instance, bluna_token_instance) =
+        instantiate_bluna_contracts(&mut app, &user1);
+
     // instantiate pair
-    let pair_instance = instantiate_pair(&mut app, &user1);
+    let pair_instance = instantiate_pair(
+        &mut app,
+        &user1,
+        token_code_id,
+        pair_code_id,
+        &factory_instance,
+        &bluna_token_instance,
+        &bluna_reward_instance,
+    );
 
     // provide liquidity, accumulators are empty
     let (msg, coins) = provide_liquidity_msg(
@@ -581,6 +530,35 @@ fn create_pair_with_same_assets() {
 
     let token_contract_code_id = store_token_code(&mut router);
     let pair_contract_code_id = store_pair_code(&mut router);
+    let whitelist_code_id = store_whitelist_code(&mut router);
+
+    let factory_code_id = store_factory_code(&mut router);
+
+    let init_msg = FactoryInstantiateMsg {
+        fee_address: None,
+        pair_configs: vec![PairConfig {
+            code_id: pair_contract_code_id,
+            maker_fee_bps: 0,
+            total_fee_bps: 0,
+            pair_type: PairType::Stable {},
+            is_disabled: None,
+        }],
+        token_code_id: token_contract_code_id,
+        generator_address: Some(String::from("generator")),
+        owner: String::from("owner0000"),
+        whitelist_code_id,
+    };
+
+    let factory_instance = router
+        .instantiate_contract(
+            factory_code_id,
+            owner.clone(),
+            &init_msg,
+            &[],
+            "FACTORY",
+            None,
+        )
+        .unwrap();
 
     let msg = InstantiateMsg {
         asset_infos: [
@@ -592,7 +570,7 @@ fn create_pair_with_same_assets() {
             },
         ],
         token_code_id: token_contract_code_id,
-        factory_addr: Addr::unchecked("factory"),
+        factory_addr: factory_instance.clone(),
         init_params: None,
     };
 
@@ -617,6 +595,7 @@ fn update_pair_config() {
 
     let token_contract_code_id = store_token_code(&mut router);
     let pair_contract_code_id = store_pair_code(&mut router);
+    let whitelist_code_id = store_whitelist_code(&mut router);
 
     let factory_code_id = store_factory_code(&mut router);
 
@@ -626,7 +605,7 @@ fn update_pair_config() {
         token_code_id: token_contract_code_id,
         generator_address: Some(String::from("generator")),
         owner: owner.to_string(),
-        whitelist_code_id: 234u64,
+        whitelist_code_id,
     };
 
     let factory_instance = router

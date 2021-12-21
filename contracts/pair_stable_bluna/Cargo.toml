@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 # for quicker tests, cargo test --lib
 # for more explicit tests, cargo test --features=backtraces
-backtraces = ["cosmwasm-std/backtraces", "cosmwasm-vm/backtraces"]
+backtraces = ["cosmwasm-std/backtraces"]
 
 [dependencies]
 integer-sqrt = "0.1.5"
@@ -34,14 +34,15 @@ serde = { version = "1.0.103", default-features = false, features = ["derive"] }
 thiserror = { version = "1.0.20" }
 cosmwasm-bignumber = "2.2.0"
 protobuf = { version = "2", features = ["with-bytes"] }
-anchor_basset = {git = "https://github.com/Anchor-Protocol/anchor-bAsset-contracts.git", tag = "v0.2.1", package = "basset"}
+anchor-basset = {git = "https://github.com/astroport-fi/anchor-bAsset-contracts.git", branch = "master", package = "basset"}
 
 [dev-dependencies]
-cosmwasm-vm = { version = "0.16.0", default-features = false, features = ["iterator"] }
 cosmwasm-schema = "0.16.0"
-terra-cosmwasm = { version = "2.2.0" }
-proptest = "1.0.0"
-sim =  { path = "../sim" }
 astroport-token = {path = "../token"}
-terra-multi-test = {git = "https://github.com/astroport-fi/terra-plus.git"}
+terra-multi-test = {git = "https://github.com/astroport-fi/terra-plus.git", tag = "v0.9.1-terra"}
 astroport-factory = {path = "../factory"}
+anchor-basset-token = {git = "https://github.com/astroport-fi/anchor-bAsset-contracts.git", branch = "master", package = "anchor_basset_token"}
+anchor-basset-reward = {git = "https://github.com/astroport-fi/anchor-bAsset-contracts.git", branch = "master", package = "anchor_basset_reward"}
+anchor-basset-hub = {git = "https://github.com/astroport-fi/anchor-bAsset-contracts.git", branch = "master", package = "anchor_basset_hub"}
+astroport-whitelist = {path = "../whitelist"}
+cw20-legacy = { version = "0.2.0", features = ["library"]}
