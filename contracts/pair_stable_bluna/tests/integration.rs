@@ -4,34 +4,35 @@ use astroport::factory::{
     QueryMsg as FactoryQueryMsg,
 };
 use astroport::pair::{
-    CumulativePricesResponse, Cw20HookMsg, ExecuteMsg, InstantiateMsg, QueryMsg, TWAP_PRECISION,
+    ConfigResponse, CumulativePricesResponse, Cw20HookMsg, InstantiateMsg, QueryMsg, TWAP_PRECISION,
 };
+
+use astroport::pair_stable_bluna::{
+    ExecuteMsg, StablePoolConfig, StablePoolParams, StablePoolUpdateParams,
+};
+
 use astroport::token::InstantiateMsg as TokenInstantiateMsg;
-use cosmwasm_std::testing::{mock_env, MockApi, MockStorage};
-use cosmwasm_std::{attr, to_binary, Addr, Coin, Decimal, QueryRequest, Uint128, WasmQuery};
+use astroport_pair_stable_bluna::math::{MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME};
+use cosmwasm_std::testing::{mock_env, MockApi, MockQuerier, MockStorage};
+use cosmwasm_std::{
+    attr, from_binary, to_binary, Addr, Coin, Decimal, QueryRequest, Uint128, WasmQuery,
+};
 use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
-use terra_multi_test::{AppBuilder, BankKeeper, ContractWrapper, Executor, TerraApp, TerraMock};
+use terra_multi_test::{App, BankKeeper, ContractWrapper, Executor, TerraMockQuerier};
 
 const OWNER: &str = "owner";
 
-fn mock_app() -> TerraApp {
+fn mock_app() -> App {
     let env = mock_env();
     let api = MockApi::default();
-    let bank = BankKeeper::new();
-    let storage = MockStorage::new();
-    let custom = TerraMock::luna_ust_case();
+    let bank = BankKeeper {};
 
-    AppBuilder::new()
-        .with_api(api)
-        .with_block(env.block)
-        .with_bank(bank)
-        .with_storage(storage)
-        .with_custom(custom)
-        .build()
+    let terra_mock_querier = TerraMockQuerier::new(MockQuerier::new(&[]));
+    App::new(api, env.block, bank, MockStorage::new(), terra_mock_querier)
 }
 
-fn store_token_code(app: &mut TerraApp) -> u64 {
-    let astro_token_contract = Box::new(ContractWrapper::new_with_empty(
+fn store_token_code(app: &mut App) -> u64 {
+    let astro_token_contract = Box::new(ContractWrapper::new(
         astroport_token::contract::execute,
         astroport_token::contract::instantiate,
         astroport_token::contract::query,
@@ -40,33 +41,33 @@ fn store_token_code(app: &mut TerraApp) -> u64 {
     app.store_code(astro_token_contract)
 }
 
-fn store_pair_code(app: &mut TerraApp) -> u64 {
+fn store_pair_code(app: &mut App) -> u64 {
     let pair_contract = Box::new(
-        ContractWrapper::new_with_empty(
-            astroport_pair::contract::execute,
-            astroport_pair::contract::instantiate,
-            astroport_pair::contract::query,
+        ContractWrapper::new(
+            astroport_pair_stable_bluna::contract::execute,
+            astroport_pair_stable_bluna::contract::instantiate,
+            astroport_pair_stable_bluna::contract::query,
         )
-        .with_reply_empty(astroport_pair::contract::reply),
+        .with_reply(astroport_pair_stable_bluna::contract::reply),
     );
 
     app.store_code(pair_contract)
 }
 
-fn store_factory_code(app: &mut TerraApp) -> u64 {
+fn store_factory_code(app: &mut App) -> u64 {
     let factory_contract = Box::new(
-        ContractWrapper::new_with_empty(
+        ContractWrapper::new(
             astroport_factory::contract::execute,
             astroport_factory::contract::instantiate,
             astroport_factory::contract::query,
         )
-        .with_reply_empty(astroport_factory::contract::reply),
+        .with_reply(astroport_factory::contract::reply),
     );
 
     app.store_code(factory_contract)
 }
 
-fn instantiate_pair(mut router: &mut TerraApp, owner: &Addr) -> Addr {
+fn instantiate_pair(mut router: &mut App, owner: &Addr) -> Addr {
     let token_contract_code_id = store_token_code(&mut router);
 
     let pair_contract_code_id = store_pair_code(&mut router);
@@ -83,6 +84,38 @@ fn instantiate_pair(mut router: &mut TerraApp, owner: &Addr) -> Addr {
         token_code_id: token_contract_code_id,
         factory_addr: Addr::unchecked("factory"),
         init_params: None,
+    };
+
+    let resp = router
+        .instantiate_contract(
+            pair_contract_code_id,
+            owner.clone(),
+            &msg,
+            &[],
+            String::from("PAIR"),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!("You need to provide init params", resp.to_string());
+
+    let msg = InstantiateMsg {
+        asset_infos: [
+            AssetInfo::NativeToken {
+                denom: "uusd".to_string(),
+            },
+            AssetInfo::NativeToken {
+                denom: "uluna".to_string(),
+            },
+        ],
+        token_code_id: token_contract_code_id,
+        factory_addr: Addr::unchecked("factory"),
+        init_params: Some(
+            to_binary(&StablePoolParams {
+                amp: 100,
+                bluna_rewarder: "bluna_rewarder".to_string(),
+            })
+            .unwrap(),
+        ),
     };
 
     let pair = router
@@ -119,7 +152,7 @@ fn test_provide_and_withdraw_liquidity() {
             vec![
                 Coin {
                     denom: "uusd".to_string(),
-                    amount: Uint128::new(233u128),
+                    amount: Uint128::new(200u128),
                 },
                 Coin {
                     denom: "uluna".to_string(),
@@ -168,7 +201,7 @@ fn test_provide_and_withdraw_liquidity() {
         .unwrap();
 
     // Provide liquidity
-    let (msg, coins) = provide_liquidity_msg(Uint128::new(100), Uint128::new(100), None, None);
+    let (msg, coins) = provide_liquidity_msg(Uint128::new(100), Uint128::new(100), None);
     let res = router
         .execute_contract(alice_address.clone(), pair_instance.clone(), &msg, &coins)
         .unwrap();
@@ -188,14 +221,16 @@ fn test_provide_and_withdraw_liquidity() {
     );
     assert_eq!(res.events[3].attributes[1], attr("action", "mint"));
     assert_eq!(res.events[3].attributes[2], attr("to", "alice"));
-    assert_eq!(res.events[3].attributes[3], attr("amount", 100.to_string()));
+    assert_eq!(
+        res.events[3].attributes[3],
+        attr("amount", 100u128.to_string())
+    );
 
     // Provide liquidity for receiver
     let (msg, coins) = provide_liquidity_msg(
         Uint128::new(100),
         Uint128::new(100),
         Some("bob".to_string()),
-        None,
     );
     let res = router
         .execute_contract(alice_address.clone(), pair_instance.clone(), &msg, &coins)
@@ -223,7 +258,6 @@ fn provide_liquidity_msg(
     uusd_amount: Uint128,
     uluna_amount: Uint128,
     receiver: Option<String>,
-    slippage_tolerance: Option<Decimal>,
 ) -> (ExecuteMsg, [Coin; 2]) {
     let msg = ExecuteMsg::ProvideLiquidity {
         assets: [
@@ -240,19 +274,19 @@ fn provide_liquidity_msg(
                 amount: uluna_amount.clone(),
             },
         ],
-        slippage_tolerance: Option::from(slippage_tolerance),
+        slippage_tolerance: None,
         auto_stake: None,
         receiver,
     };
 
     let coins = [
         Coin {
-            denom: "uluna".to_string(),
-            amount: uluna_amount.clone(),
-        },
-        Coin {
             denom: "uusd".to_string(),
             amount: uusd_amount.clone(),
+        },
+        Coin {
+            denom: "uluna".to_string(),
+            amount: uluna_amount.clone(),
         },
     ];
 
@@ -334,13 +368,13 @@ fn test_compatibility_of_tokens_with_different_precision() {
         pair_configs: vec![PairConfig {
             code_id: pair_code_id,
             maker_fee_bps: 0,
-            pair_type: PairType::Xyk {},
             total_fee_bps: 0,
+            pair_type: PairType::Stable {},
             is_disabled: None,
         }],
         token_code_id,
         generator_address: Some(String::from("generator")),
-        owner: owner.to_string(),
+        owner: String::from("owner0000"),
         whitelist_code_id: 234u64,
     };
 
@@ -356,6 +390,7 @@ fn test_compatibility_of_tokens_with_different_precision() {
         .unwrap();
 
     let msg = FactoryExecuteMsg::CreatePair {
+        pair_type: PairType::Stable {},
         asset_infos: [
             AssetInfo::Token {
                 contract_addr: token_x_instance.clone(),
@@ -364,8 +399,13 @@ fn test_compatibility_of_tokens_with_different_precision() {
                 contract_addr: token_y_instance.clone(),
             },
         ],
-        pair_type: PairType::Xyk {},
-        init_params: None,
+        init_params: Some(
+            to_binary(&StablePoolParams {
+                amp: 100,
+                bluna_rewarder: "bluna_rewarder".to_string(),
+            })
+            .unwrap(),
+        ),
     };
 
     app.execute_contract(owner.clone(), factory_instance.clone(), &msg, &[])
@@ -455,9 +495,7 @@ fn test_compatibility_of_tokens_with_different_precision() {
         .query_wasm_smart(&token_y_instance, &msg)
         .unwrap();
 
-    let acceptable_spread_amount = Uint128::new(10);
-
-    assert_eq!(res.balance, y_expected_return - acceptable_spread_amount);
+    assert_eq!(res.balance, y_expected_return);
 }
 
 #[test]
@@ -489,7 +527,6 @@ fn test_if_twap_is_calculated_correctly_when_pool_idles() {
         Uint128::new(1000000_000000),
         Uint128::new(1000000_000000),
         None,
-        Option::from(Decimal::one()),
     );
     app.execute_contract(user1.clone(), pair_instance.clone(), &msg, &coins)
         .unwrap();
@@ -505,10 +542,9 @@ fn test_if_twap_is_calculated_correctly_when_pool_idles() {
 
     // provide liquidity, accumulators firstly filled with the same prices
     let (msg, coins) = provide_liquidity_msg(
-        Uint128::new(2000000_000000),
+        Uint128::new(3000000_000000),
         Uint128::new(1000000_000000),
         None,
-        Some(Decimal::percent(50)),
     );
     app.execute_contract(user1.clone(), pair_instance.clone(), &msg, &coins)
         .unwrap();
@@ -532,11 +568,10 @@ fn test_if_twap_is_calculated_correctly_when_pool_idles() {
     let twap0 = cpr_new.price0_cumulative_last - cpr_old.price0_cumulative_last;
     let twap1 = cpr_new.price1_cumulative_last - cpr_old.price1_cumulative_last;
 
-    // Prices weren't changed for the last day, uusd amount in pool = 3000000_000000, uluna = 2000000_000000
-    // In accumulators we don't have any precision so we rely on elapsed time to not consider it
+    // Prices weren't changed for the last day, uusd amount in pool = 4000000_000000, uluna = 2000000_000000
     let price_precision = Uint128::from(10u128.pow(TWAP_PRECISION.into()));
-    assert_eq!(twap0 / price_precision, Uint128::new(57600)); // 0.666666 * ELAPSED_SECONDS (86400)
-    assert_eq!(twap1 / price_precision, Uint128::new(129600)); //   1.5 * ELAPSED_SECONDS
+    assert_eq!(twap0 / price_precision, Uint128::new(85684)); // 1.008356286 * ELAPSED_SECONDS (86400)
+    assert_eq!(twap1 / price_precision, Uint128::new(87121)); //   0.991712963 * ELAPSED_SECONDS
 }
 
 #[test]
@@ -573,4 +608,233 @@ fn create_pair_with_same_assets() {
         .unwrap_err();
 
     assert_eq!(resp.to_string(), "Doubling assets in asset infos")
+}
+
+#[test]
+fn update_pair_config() {
+    let mut router = mock_app();
+    let owner = Addr::unchecked("owner");
+
+    let token_contract_code_id = store_token_code(&mut router);
+    let pair_contract_code_id = store_pair_code(&mut router);
+
+    let factory_code_id = store_factory_code(&mut router);
+
+    let init_msg = FactoryInstantiateMsg {
+        fee_address: None,
+        pair_configs: vec![],
+        token_code_id: token_contract_code_id,
+        generator_address: Some(String::from("generator")),
+        owner: owner.to_string(),
+        whitelist_code_id: 234u64,
+    };
+
+    let factory_instance = router
+        .instantiate_contract(
+            factory_code_id,
+            owner.clone(),
+            &init_msg,
+            &[],
+            "FACTORY",
+            None,
+        )
+        .unwrap();
+
+    let msg = InstantiateMsg {
+        asset_infos: [
+            AssetInfo::NativeToken {
+                denom: "uusd".to_string(),
+            },
+            AssetInfo::NativeToken {
+                denom: "uluna".to_string(),
+            },
+        ],
+        token_code_id: token_contract_code_id,
+        factory_addr: factory_instance,
+        init_params: Some(
+            to_binary(&StablePoolParams {
+                amp: 100,
+                bluna_rewarder: "bluna_rewarder".to_string(),
+            })
+            .unwrap(),
+        ),
+    };
+
+    let pair = router
+        .instantiate_contract(
+            pair_contract_code_id,
+            owner.clone(),
+            &msg,
+            &[],
+            String::from("PAIR"),
+            None,
+        )
+        .unwrap();
+
+    let res: ConfigResponse = router
+        .wrap()
+        .query_wasm_smart(pair.clone(), &QueryMsg::Config {})
+        .unwrap();
+
+    let params: StablePoolConfig = from_binary(&res.params.unwrap()).unwrap();
+
+    assert_eq!(params.amp, Decimal::from_ratio(100u32, 1u32));
+
+    //Start changing amp with incorrect next amp
+    let msg = ExecuteMsg::UpdateConfig {
+        params: to_binary(&StablePoolUpdateParams::StartChangingAmp {
+            next_amp: MAX_AMP + 1,
+            next_amp_time: router.block_info().time.seconds(),
+        })
+        .unwrap(),
+    };
+
+    let resp = router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &[])
+        .unwrap_err();
+
+    assert_eq!(
+        resp.to_string(),
+        format!(
+            "Amp coefficient must be greater than 0 and less than or equal to {}",
+            MAX_AMP
+        )
+    );
+
+    //Start changing amp with big difference between the old and new amp value
+    let msg = ExecuteMsg::UpdateConfig {
+        params: to_binary(&StablePoolUpdateParams::StartChangingAmp {
+            next_amp: 100 * MAX_AMP_CHANGE + 1,
+            next_amp_time: router.block_info().time.seconds(),
+        })
+        .unwrap(),
+    };
+
+    let resp = router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &[])
+        .unwrap_err();
+
+    assert_eq!(
+        resp.to_string(),
+        format!(
+            "The difference between the old and new amp value must not exceed {} times",
+            MAX_AMP_CHANGE
+        )
+    );
+
+    //Start changing amp earlier than the MIN_AMP_CHANGING_TIME has elapsed
+    let msg = ExecuteMsg::UpdateConfig {
+        params: to_binary(&StablePoolUpdateParams::StartChangingAmp {
+            next_amp: 250,
+            next_amp_time: router.block_info().time.seconds(),
+        })
+        .unwrap(),
+    };
+
+    let resp = router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &[])
+        .unwrap_err();
+
+    assert_eq!(
+        resp.to_string(),
+        format!(
+            "Amp coefficient cannot be changed more often than once per {} seconds",
+            MIN_AMP_CHANGING_TIME
+        )
+    );
+
+    // Start increasing amp
+    router.update_block(|b| {
+        b.time = b.time.plus_seconds(MIN_AMP_CHANGING_TIME);
+    });
+
+    let msg = ExecuteMsg::UpdateConfig {
+        params: to_binary(&StablePoolUpdateParams::StartChangingAmp {
+            next_amp: 250,
+            next_amp_time: router.block_info().time.seconds() + MIN_AMP_CHANGING_TIME,
+        })
+        .unwrap(),
+    };
+
+    router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &[])
+        .unwrap();
+
+    router.update_block(|b| {
+        b.time = b.time.plus_seconds(MIN_AMP_CHANGING_TIME / 2);
+    });
+
+    let res: ConfigResponse = router
+        .wrap()
+        .query_wasm_smart(pair.clone(), &QueryMsg::Config {})
+        .unwrap();
+
+    let params: StablePoolConfig = from_binary(&res.params.unwrap()).unwrap();
+
+    assert_eq!(params.amp, Decimal::from_ratio(175u32, 1u32));
+
+    router.update_block(|b| {
+        b.time = b.time.plus_seconds(MIN_AMP_CHANGING_TIME / 2);
+    });
+
+    let res: ConfigResponse = router
+        .wrap()
+        .query_wasm_smart(pair.clone(), &QueryMsg::Config {})
+        .unwrap();
+
+    let params: StablePoolConfig = from_binary(&res.params.unwrap()).unwrap();
+
+    assert_eq!(params.amp, Decimal::from_ratio(250u32, 1u32));
+
+    // Start decreasing amp
+    router.update_block(|b| {
+        b.time = b.time.plus_seconds(MIN_AMP_CHANGING_TIME);
+    });
+
+    let msg = ExecuteMsg::UpdateConfig {
+        params: to_binary(&StablePoolUpdateParams::StartChangingAmp {
+            next_amp: 50,
+            next_amp_time: router.block_info().time.seconds() + MIN_AMP_CHANGING_TIME,
+        })
+        .unwrap(),
+    };
+
+    router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &[])
+        .unwrap();
+
+    router.update_block(|b| {
+        b.time = b.time.plus_seconds(MIN_AMP_CHANGING_TIME / 2);
+    });
+
+    let res: ConfigResponse = router
+        .wrap()
+        .query_wasm_smart(pair.clone(), &QueryMsg::Config {})
+        .unwrap();
+
+    let params: StablePoolConfig = from_binary(&res.params.unwrap()).unwrap();
+
+    assert_eq!(params.amp, Decimal::from_ratio(150u32, 1u32));
+
+    // Stop changing amp
+    let msg = ExecuteMsg::UpdateConfig {
+        params: to_binary(&StablePoolUpdateParams::StopChangingAmp {}).unwrap(),
+    };
+
+    router
+        .execute_contract(owner.clone(), pair.clone(), &msg, &[])
+        .unwrap();
+
+    router.update_block(|b| {
+        b.time = b.time.plus_seconds(MIN_AMP_CHANGING_TIME / 2);
+    });
+
+    let res: ConfigResponse = router
+        .wrap()
+        .query_wasm_smart(pair.clone(), &QueryMsg::Config {})
+        .unwrap();
+
+    let params: StablePoolConfig = from_binary(&res.params.unwrap()).unwrap();
+
+    assert_eq!(params.amp, Decimal::from_ratio(150u32, 1u32));
 }
