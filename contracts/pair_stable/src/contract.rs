@@ -1162,7 +1162,7 @@ pub fn amount_of(coins: &[Coin], denom: String) -> Uint128 {
 /// * **offer_amount** is the object of type [`Uint128`]. Sets the offer amount.
 ///
 /// * **commission_rate** is the object of type [`Decimal`]. Sets the commission rate.
-fn compute_swap(
+pub fn compute_swap(
     offer_pool: Uint128,
     offer_precision: u8,
     ask_pool: Uint128,
@@ -1207,7 +1207,7 @@ fn compute_swap(
 /// * **offer_amount** is the object of type [`Uint128`]. Sets the ask amount.
 ///
 /// * **commission_rate** is the object of type [`Decimal`]. Sets the commission rate.
-fn compute_offer_amount(
+pub fn compute_offer_amount(
     offer_pool: Uint128,
     offer_precision: u8,
     ask_pool: Uint128,
@@ -1481,7 +1481,7 @@ fn stop_changing_amp(mut config: Config, deps: DepsMut, env: Env) -> StdResult<(
 /// * **config** is the object of type [`Config`].
 ///
 /// * **env** is the object of type [`Env`].
-fn compute_current_amp(config: &Config, env: &Env) -> StdResult<u64> {
+pub fn compute_current_amp(config: &Config, env: &Env) -> StdResult<u64> {
     let block_time = env.block.time.seconds();
 
     if block_time < config.next_amp_time {

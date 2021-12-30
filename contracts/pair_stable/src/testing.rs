@@ -1,10 +1,12 @@
 use crate::contract::{
-    accumulate_prices, assert_max_spread, execute, instantiate, query_pair_info, query_pool,
-    query_reverse_simulation, query_share, query_simulation, reply,
+    accumulate_prices, assert_max_spread, compute_current_amp, compute_offer_amount, compute_swap,
+    execute, instantiate, query_pair_info, query_pool, query_reverse_simulation, query_share,
+    query_simulation, reply,
 };
 use crate::error::ContractError;
 use crate::math::{calc_amount, AMP_PRECISION};
 use crate::mock_querier::mock_dependencies;
+use std::str::FromStr;
 
 use crate::response::MsgInstantiateContractResponse;
 use crate::state::Config;
@@ -1006,6 +1008,94 @@ fn try_token_to_native() {
     let info = mock_info("liquidtity0000", &[]);
     let res = execute(deps.as_mut(), env, info, msg).unwrap_err();
     assert_eq!(res, ContractError::Unauthorized {});
+}
+
+#[test]
+fn try_compute_swap_and_compute_offer_amount() {
+    let env = mock_env_with_block_time(1000);
+    let config = Config {
+        pair_info: PairInfo {
+            asset_infos: [
+                AssetInfo::NativeToken {
+                    denom: "uusd".to_string(),
+                },
+                AssetInfo::Token {
+                    contract_addr: Addr::unchecked("asset0000"),
+                },
+            ],
+            contract_addr: Addr::unchecked("pair"),
+            liquidity_token: Addr::unchecked("lp_token"),
+            pair_type: PairType::Stable {},
+        },
+        factory_addr: Addr::unchecked("factory"),
+        block_time_last: 0,
+        price0_cumulative_last: Uint128::new(0),
+        price1_cumulative_last: Uint128::new(0),
+        init_amp: 100 * AMP_PRECISION,
+        init_amp_time: env.block.time.seconds(),
+        next_amp: 100 * AMP_PRECISION,
+        next_amp_time: env.block.time.seconds(),
+    };
+
+    let (return_amount, spread_amount, commission_amount) = compute_swap(
+        Uint128::new(1000000000),
+        6,
+        Uint128::new(1000000000000),
+        9,
+        Uint128::new(100000000),
+        Decimal::from_str("0.006").unwrap(),
+        compute_current_amp(&config, &env).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(return_amount, Uint128::new(99300710200));
+    assert_eq!(spread_amount, Uint128::new(99889135));
+    assert_eq!(commission_amount, Uint128::new(599400665));
+
+    let (return_amount, spread_amount, commission_amount) = compute_swap(
+        Uint128::new(1000000000000),
+        9,
+        Uint128::new(1000000000),
+        6,
+        Uint128::new(100000000000),
+        Decimal::from_str("0.006").unwrap(),
+        compute_current_amp(&config, &env).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(return_amount, Uint128::new(99300710));
+    assert_eq!(spread_amount, Uint128::new(99889));
+    assert_eq!(commission_amount, Uint128::new(599400));
+
+    let (offer_amount, spread_amount, commission_amount) = compute_offer_amount(
+        Uint128::new(1000000000),
+        6,
+        Uint128::new(10000000000),
+        7,
+        Uint128::new(1000000000),
+        Decimal::from_str("0.006").unwrap(),
+        compute_current_amp(&config, &env).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(offer_amount, Uint128::new(100502511));
+    assert_eq!(spread_amount, Uint128::new(0));
+    assert_eq!(commission_amount, Uint128::new(6036217));
+
+    let (offer_amount, spread_amount, commission_amount) = compute_offer_amount(
+        Uint128::new(10000000000),
+        7,
+        Uint128::new(1000000000),
+        6,
+        Uint128::new(100000000),
+        Decimal::from_str("0.006").unwrap(),
+        compute_current_amp(&config, &env).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(offer_amount, Uint128::new(1005025116));
+    assert_eq!(spread_amount, Uint128::new(0));
+    assert_eq!(commission_amount, Uint128::new(603621));
 }
 
 #[test]
