@@ -1031,9 +1031,9 @@ fn try_compute_swap_and_compute_offer_amount() {
         block_time_last: 0,
         price0_cumulative_last: Uint128::new(0),
         price1_cumulative_last: Uint128::new(0),
-        init_amp: 100 * AMP_PRECISION,
+        init_amp: 1 * AMP_PRECISION,
         init_amp_time: env.block.time.seconds(),
-        next_amp: 100 * AMP_PRECISION,
+        next_amp: 1 * AMP_PRECISION,
         next_amp_time: env.block.time.seconds(),
     };
 
@@ -1048,9 +1048,9 @@ fn try_compute_swap_and_compute_offer_amount() {
     )
     .unwrap();
 
-    assert_eq!(return_amount, Uint128::new(99300710200));
-    assert_eq!(spread_amount, Uint128::new(99889135));
-    assert_eq!(commission_amount, Uint128::new(599400665));
+    assert_eq!(return_amount, Uint128::new(94655935980));
+    assert_eq!(spread_amount, Uint128::new(4772700222));
+    assert_eq!(commission_amount, Uint128::new(571363798));
 
     let (return_amount, spread_amount, commission_amount) = compute_swap(
         Uint128::new(1000000000000),
@@ -1063,9 +1063,9 @@ fn try_compute_swap_and_compute_offer_amount() {
     )
     .unwrap();
 
-    assert_eq!(return_amount, Uint128::new(99300710));
-    assert_eq!(spread_amount, Uint128::new(99889));
-    assert_eq!(commission_amount, Uint128::new(599400));
+    assert_eq!(return_amount, Uint128::new(94655935));
+    assert_eq!(spread_amount, Uint128::new(4772700));
+    assert_eq!(commission_amount, Uint128::new(571363));
 
     let (offer_amount, spread_amount, commission_amount) = compute_offer_amount(
         Uint128::new(1000000000),
@@ -1078,7 +1078,7 @@ fn try_compute_swap_and_compute_offer_amount() {
     )
     .unwrap();
 
-    assert_eq!(offer_amount, Uint128::new(100502511));
+    assert_eq!(offer_amount, Uint128::new(95774391));
     assert_eq!(spread_amount, Uint128::new(0));
     assert_eq!(commission_amount, Uint128::new(6036217));
 
@@ -1093,7 +1093,7 @@ fn try_compute_swap_and_compute_offer_amount() {
     )
     .unwrap();
 
-    assert_eq!(offer_amount, Uint128::new(1005025116));
+    assert_eq!(offer_amount, Uint128::new(957743917));
     assert_eq!(spread_amount, Uint128::new(0));
     assert_eq!(commission_amount, Uint128::new(603621));
 }
