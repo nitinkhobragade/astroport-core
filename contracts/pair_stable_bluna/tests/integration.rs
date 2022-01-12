@@ -1,26 +1,23 @@
 use astroport::asset::{Asset, AssetInfo, PairInfo};
-use astroport::factory::{
-    ExecuteMsg as FactoryExecuteMsg, InstantiateMsg as FactoryInstantiateMsg, PairConfig, PairType,
-    QueryMsg as FactoryQueryMsg,
-};
+use astroport::factory::{InstantiateMsg as FactoryInstantiateMsg, PairConfig, PairType};
 use astroport::pair::{
-    ConfigResponse, CumulativePricesResponse, Cw20HookMsg, InstantiateMsg, QueryMsg, TWAP_PRECISION,
+    ConfigResponse, CumulativePricesResponse, InstantiateMsg, QueryMsg, TWAP_PRECISION,
 };
 
 use astroport::pair_stable_bluna::{
     ExecuteMsg, StablePoolConfig, StablePoolParams, StablePoolUpdateParams,
 };
 
-use astroport::token::InstantiateMsg as TokenInstantiateMsg;
 use astroport_pair_stable_bluna::math::{MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME};
 use cosmwasm_std::testing::{mock_env, MockApi, MockStorage, MOCK_CONTRACT_ADDR};
 use cosmwasm_std::{
-    attr, from_binary, to_binary, Addr, Coin, Decimal, QueryRequest, StdResult, Uint128, WasmQuery,
+    attr, from_binary, to_binary, Addr, Coin, Decimal, QueryRequest, Uint128, Validator, WasmQuery,
 };
-use cw20::{BalanceResponse, Cw20Coin, Cw20ExecuteMsg, Cw20QueryMsg, MinterResponse};
+use cw20::MinterResponse;
 use terra_multi_test::{AppBuilder, BankKeeper, ContractWrapper, Executor, TerraApp, TerraMock};
 
 const OWNER: &str = "owner";
+const DEFAULT_VALIDATOR: &str = "default-validator";
 
 fn mock_app() -> TerraApp {
     let env = mock_env();
@@ -119,6 +116,15 @@ fn instantiate_factory(
         .unwrap()
 }
 
+fn sample_validator(addr: String) -> Validator {
+    Validator {
+        address: addr,
+        commission: Decimal::percent(3),
+        max_commission: Decimal::percent(10),
+        max_change_rate: Decimal::percent(1),
+    }
+}
+
 fn instantiate_bluna_contracts(router: &mut TerraApp, sender: &Addr) -> (Addr, Addr, Addr) {
     let bluna_hub_contract = Box::new(ContractWrapper::new_with_empty(
         anchor_basset_hub::contract::execute,
@@ -127,15 +133,16 @@ fn instantiate_bluna_contracts(router: &mut TerraApp, sender: &Addr) -> (Addr, A
     ));
 
     let bluna_hub_code_id = router.store_code(bluna_hub_contract);
+    let validator = sample_validator(DEFAULT_VALIDATOR.to_string());
 
     let bluna_hub_init_msg = anchor_basset::hub::InstantiateMsg {
-        epoch_period: 0,
-        er_threshold: Decimal::zero(),
+        epoch_period: 30,
+        er_threshold: Decimal::one(),
         peg_recovery_fee: Decimal::zero(),
-        reward_denom: "".to_string(),
-        unbonding_period: 0,
-        underlying_coin_denom: "".to_string(),
-        validator: "".to_string(),
+        reward_denom: "uusd".to_string(),
+        unbonding_period: 2,
+        underlying_coin_denom: "uluna".to_string(),
+        validator: validator.address.clone(),
     };
 
     let bluna_hub_instance = router
@@ -143,7 +150,10 @@ fn instantiate_bluna_contracts(router: &mut TerraApp, sender: &Addr) -> (Addr, A
             bluna_hub_code_id,
             sender.clone(),
             &bluna_hub_init_msg,
-            &[],
+            &[Coin {
+                denom: "uluna".to_string(),
+                amount: Uint128::new(1000),
+            }],
             "BLUNA HUB",
             None,
         )
@@ -211,7 +221,7 @@ fn instantiate_bluna_contracts(router: &mut TerraApp, sender: &Addr) -> (Addr, A
 }
 
 fn instantiate_pair(
-    mut router: &mut TerraApp,
+    router: &mut TerraApp,
     owner: &Addr,
     token_contract_code_id: u64,
     pair_contract_code_id: u64,
@@ -296,6 +306,22 @@ fn test_provide_and_withdraw_liquidity() {
         )
         .unwrap();
 
+    router
+        .init_bank_balance(
+            &owner.clone(),
+            vec![
+                Coin {
+                    denom: "uluna".to_string(),
+                    amount: Uint128::new(10000u128),
+                },
+                Coin {
+                    denom: "uusd".to_string(),
+                    amount: Uint128::new(1000u128),
+                },
+            ],
+        )
+        .unwrap();
+
     let token_code_id = store_token_code(&mut router);
     let pair_code_id = store_pair_code(&mut router);
 
@@ -344,7 +370,12 @@ fn test_provide_and_withdraw_liquidity() {
         .unwrap();
 
     // Provide liquidity
-    let (msg, coins) = provide_liquidity_msg(Uint128::new(100), Uint128::new(100), None);
+    let (msg, coins) = provide_liquidity_msg(
+        bluna_hub_instance.clone(),
+        Uint128::new(100),
+        Uint128::new(100),
+        None,
+    );
     let res = router
         .execute_contract(alice_address.clone(), pair_instance.clone(), &msg, &coins)
         .unwrap();
@@ -371,6 +402,7 @@ fn test_provide_and_withdraw_liquidity() {
 
     // Provide liquidity for receiver
     let (msg, coins) = provide_liquidity_msg(
+        bluna_hub_instance.clone(),
         Uint128::new(100),
         Uint128::new(100),
         Some("bob".to_string()),
@@ -398,11 +430,11 @@ fn test_provide_and_withdraw_liquidity() {
 }
 
 fn provide_liquidity_msg(
-    bluna_token: &Addr,
+    bluna_token: Addr,
     bluna_amount: Uint128,
     uluna_amount: Uint128,
     receiver: Option<String>,
-) -> (ExecuteMsg, [Coin; 2]) {
+) -> (ExecuteMsg, [Coin; 1]) {
     let msg = ExecuteMsg::ProvideLiquidity {
         assets: [
             Asset {
@@ -473,6 +505,7 @@ fn test_if_twap_is_calculated_correctly_when_pool_idles() {
 
     // provide liquidity, accumulators are empty
     let (msg, coins) = provide_liquidity_msg(
+        bluna_hub_instance.clone(),
         Uint128::new(1000000_000000),
         Uint128::new(1000000_000000),
         None,
@@ -491,6 +524,7 @@ fn test_if_twap_is_calculated_correctly_when_pool_idles() {
 
     // provide liquidity, accumulators firstly filled with the same prices
     let (msg, coins) = provide_liquidity_msg(
+        bluna_hub_instance.clone(),
         Uint128::new(3000000_000000),
         Uint128::new(1000000_000000),
         None,
