@@ -33,6 +33,33 @@ pub fn calc_amount(balance_in: u128, balance_out: u128, amount_in: u128, amp: u6
 }
 
 /// ## Description
+/// Calculates swapped amount.
+/// ## Params
+/// * **offer_pool** is the object of type [`u128`].
+///
+/// * **ask_pool** is the object of type [`u128`].
+///
+/// * **ask_amount** is the object of type [`u128`].
+///
+/// * **amp** is the object of type [`u64`].
+pub fn calc_offer_amount(
+    offer_pool: u128,
+    ask_pool: u128,
+    ask_amount: u128,
+    amp: u64,
+) -> Option<u128> {
+    let leverage = amp.checked_mul(u64::from(N_COINS)).unwrap();
+    let new_ask_pool = ask_pool - ask_amount;
+
+    let d = compute_d(leverage, offer_pool, ask_pool).unwrap();
+
+    let new_offer_pool = compute_new_balance(leverage, new_ask_pool, d)?;
+
+    let amount_swapped = new_offer_pool - offer_pool;
+    Some(amount_swapped)
+}
+
+/// ## Description
 /// Computes stable swap invariant (D)
 ///
 /// * **Equation**

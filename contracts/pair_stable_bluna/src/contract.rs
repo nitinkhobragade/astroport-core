@@ -1,6 +1,7 @@
 use crate::error::ContractError;
 use crate::math::{
-    calc_amount, compute_d, AMP_PRECISION, MAX_AMP, MAX_AMP_CHANGE, MIN_AMP_CHANGING_TIME, N_COINS,
+    calc_amount, calc_offer_amount, compute_d, AMP_PRECISION, MAX_AMP, MAX_AMP_CHANGE,
+    MIN_AMP_CHANGING_TIME, N_COINS,
 };
 use crate::state::{
     Config, BLUNA_REWARD_GLOBAL_INDEX, BLUNA_REWARD_HOLDER, BLUNA_REWARD_USER_INDEXES, CONFIG,
@@ -217,6 +218,13 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 ///             max_spread,
 ///             to,
 ///         }** Performs an swap operation with the specified parameters.
+///
+/// * **ExecuteMsg::HandleReward {
+///             previous_reward_balance,
+///             old_user_share,
+///             old_total_share,
+///             user,
+///         }** Handles and distributes rewards
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
     deps: DepsMut,
@@ -1252,13 +1260,9 @@ fn compute_swap(
     let ask_pool = adjust_precision(ask_pool, ask_precision, greater_precision)?;
     let offer_amount = adjust_precision(offer_amount, offer_precision, greater_precision)?;
 
-    let return_amount = adjust_precision(
-        Uint128::new(
-            calc_amount(offer_pool.u128(), ask_pool.u128(), offer_amount.u128(), amp).unwrap(),
-        ),
-        greater_precision,
-        ask_precision,
-    )?;
+    let return_amount = Uint128::new(
+        calc_amount(offer_pool.u128(), ask_pool.u128(), offer_amount.u128(), amp).unwrap(),
+    );
 
     // We assume the assets should stay in a 1:1 ratio, the true exchange rate is 1. So any exchange rate <1 could be considered the spread
     let spread_amount = offer_amount.saturating_sub(return_amount);
@@ -1267,6 +1271,10 @@ fn compute_swap(
 
     // commission will be absorbed to pool
     let return_amount: Uint128 = return_amount.checked_sub(commission_amount).unwrap();
+
+    let return_amount = adjust_precision(return_amount, greater_precision, ask_precision)?;
+    let spread_amount = adjust_precision(spread_amount, greater_precision, ask_precision)?;
+    let commission_amount = adjust_precision(commission_amount, greater_precision, ask_precision)?;
 
     Ok((return_amount, spread_amount, commission_amount))
 }
@@ -1301,24 +1309,24 @@ fn compute_offer_amount(
     let inv_one_minus_commission: Decimal = (Decimal256::one() / one_minus_commission).into();
     let before_commission_deduction = ask_amount * inv_one_minus_commission;
 
-    let offer_amount = adjust_precision(
-        Uint128::new(
-            calc_amount(
-                ask_pool.u128(),
-                offer_pool.u128(),
-                before_commission_deduction.u128(),
-                amp,
-            )
-            .unwrap(),
-        ),
-        greater_precision,
-        offer_precision,
-    )?;
+    let offer_amount = Uint128::new(
+        calc_offer_amount(
+            offer_pool.u128(),
+            ask_pool.u128(),
+            before_commission_deduction.u128(),
+            amp,
+        )
+        .unwrap(),
+    );
 
     // We assume the assets should stay in a 1:1 ratio, the true exchange rate is 1. So any exchange rate <1 could be considered the spread
     let spread_amount = offer_amount.saturating_sub(before_commission_deduction);
 
     let commission_amount = before_commission_deduction * commission_rate;
+
+    let offer_amount = adjust_precision(offer_amount, greater_precision, offer_precision)?;
+    let spread_amount = adjust_precision(spread_amount, greater_precision, ask_precision)?;
+    let commission_amount = adjust_precision(commission_amount, greater_precision, ask_precision)?;
 
     Ok((offer_amount, spread_amount, commission_amount))
 }
@@ -1614,8 +1622,16 @@ fn compute_current_amp(config: &Config, env: &Env) -> StdResult<u64> {
     }
 }
 
-// Bluna reward functions
-
+/// ## Description
+/// Get bLuna reward instantiating message
+/// Returns an [`ContractError`] on failure, otherwise returns the object
+/// of type [`SubMsg`].
+/// ## Params
+/// * **deps** is the object of type [`Deps`].
+///
+/// * **env** is the object of type [`Env`].
+///
+/// * **factory_addr** is the object of type [`Addr`].
 fn get_bluna_rewarder_instantiating_message(
     deps: Deps,
     env: &Env,
@@ -1638,6 +1654,22 @@ fn get_bluna_rewarder_instantiating_message(
     })
 }
 
+/// ## Description
+/// Get bLuna reward handling messages
+/// Returns an [`ContractError`] on failure, otherwise returns the vector that contains the objects
+/// of type [`CosmosMsg`].
+/// ## Params
+/// * **deps** is the object of type [`Deps`].
+///
+/// * **env** is the object of type [`Env`].
+///
+/// * **info** is the object of type [`MessageInfo`].
+///
+/// * **bluna_rewarder** is object of type [`str`].
+///
+/// * **old_user_share** is object of type [`Uint128`].
+///
+/// * **old_total_share** is object of type [`Uint128`].
 fn get_bluna_reward_handling_messages(
     deps: Deps,
     env: &Env,
@@ -1675,6 +1707,24 @@ fn get_bluna_reward_handling_messages(
     ])
 }
 
+/// ## Description
+/// Handles and distributes rewards.
+/// Returns an [`ContractError`] on failure, otherwise returns the [`Response`] with the
+/// specified attributes if the operation was successful.
+/// ## Params
+/// * **deps** is the object of type [`DepsMut`].
+///
+/// * **env** is the object of type [`Env`].
+///
+/// * **info** is the object of type [`MessageInfo`].
+///
+/// * **previous_reward_balance** is object of type [`Uint128`].
+///
+/// * **old_user_share** is object of type [`Uint128`].
+///
+/// * **old_total_share** is object of type [`Uint128`].
+///
+/// * **user** is object of type [`Addr`].
 pub fn handle_rewards(
     deps: DepsMut,
     env: Env,
