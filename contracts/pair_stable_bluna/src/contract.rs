@@ -1735,8 +1735,6 @@ pub fn handle_rewards(
     user: Addr,
 ) -> Result<Response, ContractError> {
     use astroport::whitelist::ExecuteMsg;
-    use cosmwasm_std::{Decimal256, Uint256};
-    use std::convert::TryInto;
 
     if info.sender != env.contract.address {
         return Err(ContractError::Unauthorized {});
@@ -1750,21 +1748,23 @@ pub fn handle_rewards(
         "uusd".to_string(),
     )?;
 
-    let latest_reward_amount = reward_balance.saturating_sub(previous_reward_balance);
+    let bluna_reward_global_index = BLUNA_REWARD_GLOBAL_INDEX.load(deps.storage)?;
+    let bluna_reward_user_index = BLUNA_REWARD_USER_INDEXES.load(deps.storage, &user)?;
+
+    let (bluna_reward_global_index, latest_reward_amount, user_reward) = calc_user_reward(
+        reward_balance,
+        previous_reward_balance,
+        old_user_share,
+        old_total_share,
+        bluna_reward_global_index,
+        bluna_reward_user_index,
+    )?;
+
+    BLUNA_REWARD_GLOBAL_INDEX.save(deps.storage, &bluna_reward_global_index)?;
+    BLUNA_REWARD_USER_INDEXES.save(deps.storage, &user, &bluna_reward_global_index)?;
 
     let mut response =
         Response::new().add_attribute("bluna_claimed_reward_to_pool", latest_reward_amount);
-
-    let mut bluna_reward_global_index = BLUNA_REWARD_GLOBAL_INDEX.load(deps.storage)?;
-
-    bluna_reward_global_index =
-        bluna_reward_global_index + Decimal256::from_ratio(latest_reward_amount, old_total_share);
-
-    let user_reward: Uint128 = ((bluna_reward_global_index
-        - BLUNA_REWARD_USER_INDEXES.load(deps.storage, &user)?)
-        * Uint256::from(old_user_share))
-    .try_into()
-    .map_err(|e| ContractError::Std(StdError::from(e)))?;
 
     response.messages.push(SubMsg::new(WasmMsg::Execute {
         contract_addr: bluna_reward_holder.to_string(),
@@ -1780,9 +1780,31 @@ pub fn handle_rewards(
         })?,
     }));
 
-    BLUNA_REWARD_GLOBAL_INDEX.save(deps.storage, &bluna_reward_global_index)?;
-    BLUNA_REWARD_USER_INDEXES.save(deps.storage, &user, &bluna_reward_global_index)?;
     Ok(response
         .add_attribute("user", user)
         .add_attribute("sent_bluna_reward", user_reward))
+}
+
+pub fn calc_user_reward(
+    reward_balance: Uint128,
+    previous_reward_balance: Uint128,
+    old_total_share: Uint128,
+    old_user_share: Uint128,
+    bluna_reward_global_index: cosmwasm_std::Decimal256,
+    bluna_reward_user_index: cosmwasm_std::Decimal256,
+) -> Result<(cosmwasm_std::Decimal256, Uint128, Uint128), ContractError> {
+    use cosmwasm_std::{Decimal256, Uint256};
+    use std::convert::TryInto;
+
+    let latest_reward_amount = reward_balance.saturating_sub(previous_reward_balance);
+
+    let bluna_reward_global_index =
+        bluna_reward_global_index + Decimal256::from_ratio(latest_reward_amount, old_total_share);
+
+    let user_reward: Uint128 = ((bluna_reward_global_index - bluna_reward_user_index)
+        * Uint256::from(old_user_share))
+    .try_into()
+    .map_err(|e| ContractError::Std(StdError::from(e)))?;
+
+    Ok((bluna_reward_global_index, latest_reward_amount, user_reward))
 }

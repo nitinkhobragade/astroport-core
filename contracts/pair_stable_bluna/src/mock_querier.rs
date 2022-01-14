@@ -5,8 +5,8 @@ use cosmwasm_std::{
 };
 use std::collections::HashMap;
 
-use astroport::factory::FeeInfoResponse;
-use astroport::factory::QueryMsg::FeeInfo;
+use astroport::factory::QueryMsg::{Config, FeeInfo};
+use astroport::factory::{ConfigResponse, FeeInfoResponse};
 use cw20::{BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
 use terra_cosmwasm::{TaxCapResponse, TaxRateResponse, TerraQuery, TerraQueryWrapper, TerraRoute};
 
@@ -136,6 +136,17 @@ impl WasmMockQuerier {
                                 fee_address: Some(Addr::unchecked("fee_address")),
                                 total_fee_bps: 30,
                                 maker_fee_bps: 1660,
+                            })
+                            .into(),
+                        ),
+                        Config { .. } => SystemResult::Ok(
+                            to_binary(&ConfigResponse {
+                                owner: Addr::unchecked("owner"),
+                                pair_configs: vec![],
+                                token_code_id: 0,
+                                fee_address: Some(Addr::unchecked("fee_address")),
+                                generator_address: Some(Addr::unchecked("gen_address")),
+                                whitelist_code_id: 666,
                             })
                             .into(),
                         ),
