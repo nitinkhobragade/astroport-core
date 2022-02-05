@@ -27,7 +27,7 @@ serde = { version = "1.0.125", default-features = false, features = ["derive"] }
 thiserror = { version = "1.0.24" }
 cw2 = "0.8"
 cw20 = "0.8"
-astroport = { path = "../../../packages/astroport", default-features = false }
+astroport = { path = "../../../packages/astroport", version = "1.2.0", default-features = false }
 terra-cosmwasm = "2.2.0"
 cosmwasm-bignumber = "2.2.0"
 
